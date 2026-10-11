@@ -48,7 +48,7 @@ def test_property_6_navigation_prompt_contains_map_json(map_data):
     """**Validates: Requirements 9.1, 15.2**
 
     For any valid map_data with grid and playerStart, the navigation prompt
-    SHALL contain JSON(grid) as a substring (only the grid array, not the full map).
+    SHALL contain JSON(grid) inside the sanitized navigation map.
     """
     prompt = format_navigation_prompt(map_data)
     grid_json = json.dumps(map_data["grid"])

@@ -462,7 +462,12 @@ def _handle_agentcore_flow(
         }
 
     # Step 4: Construct navigation prompt (with user's prompt appended)
-    navigation_prompt = prompt_formatter.format_navigation_prompt(map_data)
+    try:
+        navigation_prompt = prompt_formatter.format_navigation_prompt(map_data)
+    except (ValueError, TypeError) as error:
+        _update_session_error(session_id, f'Invalid navigation metadata: {error}')
+        return {'sessionId': session_id, 'status': 'error',
+                'message': f'Invalid navigation metadata: {error}'}
     if user_prompt:
         navigation_prompt = navigation_prompt + " " + user_prompt
 

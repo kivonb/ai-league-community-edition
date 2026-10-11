@@ -1,0 +1,23 @@
+{
+  "Name": "pathfind",
+  "Description": "Plan a route to treasure: swift (shortest, default), get_coins (greedy coins), score_aware (bounded reward detours with a time reserve). Return the path from successful results; never treat error responses as paths.",
+  "InputSchema": {
+    "Type": "object",
+    "Properties": {
+      "game_map": {"Type": "string", "Description": "JSON encoded navigation map object containing grid, playerStart, defaults (timeLimit or time, lives and scoring bonuses), and tileOverrides (points/damage only). Pass the complete navigation_map object unchanged. Legacy grids are accepted for swift/get_coins only; score_aware requires full metadata. No questions or expected answers."},
+      "start_pos": {"Type": "string", "Description": "JSON encoded [row, col] using zero-based coordinates; map playerStart takes precedence."},
+      "strategy": {"Type": "string", "Description": "swift, get_coins, or score_aware. Use score_aware only when explicitly requested. Default swift."},
+      "planning": {
+        "Type": "object",
+        "Description": "Optional score_aware settings. Omit for tested defaults; only use values explicitly requested. Do not override the map time limit.",
+        "Properties": {
+          "reserveSeconds": {"Type": "number", "Description": "Time reserved for finishing uncertainty; default max(10 seconds, 20% of map time limit)."},
+          "maxExtraMoves": {"Type": "integer", "Description": "Extra moves beyond shortest safe route, 0 to 60; default 20."},
+          "maxDetours": {"Type": "integer", "Description": "Maximum accepted detours, 0 to 20; default 12."},
+          "maxCandidateEvaluations": {"Type": "integer", "Description": "Search evaluation cap, 1 to 20000; default 5000."}
+        }
+      }
+    },
+    "Required": ["game_map"]
+  }
+}

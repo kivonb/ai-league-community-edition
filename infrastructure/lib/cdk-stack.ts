@@ -16,9 +16,10 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as cloudtrail from 'aws-cdk-lib/aws-cloudtrail';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { Construct } from 'constructs';
 import { copyDirRecursive } from './utils';
+import pathfinderToolSchema from '../../lambda/pathfinder-tool/tool-schema.json';
 
 export class CdkStack extends cdk.Stack {
   public readonly userPool: cognito.UserPool;
@@ -163,9 +164,14 @@ export class CdkStack extends cdk.Stack {
       },
     });
 
+    // Pre-created roles let AWS Budgets block new AI usage at the monthly cutoff.
+    const agenticApiRole = iam.Role.fromRoleName(this, 'CostGuardAgenticApiRole', 'ai-league-agentic-api-role', { mutable: true });
+    const gameRunnerRole = iam.Role.fromRoleName(this, 'CostGuardGameRunnerRole', 'ai-league-game-runner-role', { mutable: true });
+
     // Python Lambda function for agentic API resolver
     const agenticLambda = new lambda.Function(this, 'AgenticApiLambda', {
       functionName: 'ai-league-agentic-api',
+      role: agenticApiRole,
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../lambda/agentic-api'), {
@@ -175,6 +181,20 @@ export class CdkStack extends cdk.Stack {
             'bash', '-c',
             'pip install -r requirements.txt -t /asset-output && cp -au . /asset-output',
           ],
+          local: {
+            tryBundle(outputDir: string): boolean {
+              if (process.platform !== 'win32') return false;
+              const sourceDir = path.join(__dirname, '../../lambda/agentic-api');
+              copyDirRecursive(sourceDir, outputDir);
+              // Build for the Lambda Linux x86_64 / Python 3.12 target, not Windows.
+              execFileSync('py', ['-3.12', '-m', 'pip', 'install',
+                '--platform', 'manylinux2014_x86_64', '--implementation', 'cp',
+                '--python-version', '3.12', '--abi', 'cp312', '--only-binary=:all:',
+                '--target', outputDir, '-r', path.join(sourceDir, 'requirements.txt')],
+                { stdio: 'inherit' });
+              return true;
+            },
+          },
         },
       }),
       timeout: cdk.Duration.minutes(5),
@@ -244,25 +264,13 @@ export class CdkStack extends cdk.Stack {
       properties: {
         GatewayIdentifier: gateway.ref,
         Name: 'AgentCoreGatewayTool-Pathfinder',
-        Description: 'BFS pathfinding with swift and get_coins strategies',
+        Description: 'Pathfinding with swift, get_coins and opt-in score_aware strategies',
         TargetConfiguration: {
           Mcp: {
             Lambda: {
               LambdaArn: pathfinderLambda.functionArn,
               ToolSchema: {
-                InlinePayload: [{
-                  Name: 'pathfind',
-                  Description: 'Pathfinding Lambda with strategy selection. Strategies: swift (BFS shortest path to treasure, default), get_coins (greedily collect c7 coins on the way to treasure).',
-                  InputSchema: {
-                    Type: 'object',
-                    Properties: {
-                      game_map: { Type: 'string', Description: 'JSON encoded 2D array of the game map. Each cell is a string like "normal", "wall", "treasure", "c1"-"c8" etc.' },
-                      start_pos: { Type: 'string', Description: 'JSON encoded start position as [row, col] array, e.g. [0,0].' },
-                      strategy: { Type: 'string', Description: 'Pathfinding strategy: "swift" (shortest path to treasure) or "get_coins" (collect c7 coins then go to treasure). Default: swift.' },
-                    },
-                    Required: ['game_map'],
-                  },
-                }],
+                InlinePayload: [pathfinderToolSchema],
               },
             },
           },
@@ -297,29 +305,25 @@ export class CdkStack extends cdk.Stack {
     );
 
     // IAM Role for AgentCore Runtime instances (assumed by the runtime itself)
-    const agentCoreRuntimeRole = new iam.Role(this, 'AgentCoreRuntimeRole', {
-      roleName: 'ai-league-agentcore-runtime-role',
-      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
-      description: 'IAM role assumed by AgentCore Runtime instances',
-    });
+    const agentCoreRuntimeRole = iam.Role.fromRoleName(this, 'AgentCoreRuntimeRole', 'ai-league-agentcore-runtime-role', { mutable: true });
 
     // Grant the runtime role permissions matching reference app
-    agentCoreRuntimeRole.addToPolicy(new iam.PolicyStatement({
+    agentCoreRuntimeRole.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
       resources: ['*'],
     }));
-    agentCoreRuntimeRole.addToPolicy(new iam.PolicyStatement({
+    agentCoreRuntimeRole.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['lambda:InvokeFunction'],
       resources: ['*'],
     }));
-    agentCoreRuntimeRole.addToPolicy(new iam.PolicyStatement({
+    agentCoreRuntimeRole.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['bedrock-agentcore:InvokeGateway'],
       resources: ['*'],
     }));
-    agentCoreRuntimeRole.addToPolicy(new iam.PolicyStatement({
+    agentCoreRuntimeRole.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         'bedrock-agentcore:CreateEvent', 'bedrock-agentcore:GetEvent',
@@ -330,22 +334,22 @@ export class CdkStack extends cdk.Stack {
       ],
       resources: ['*'],
     }));
-    agentCoreRuntimeRole.addToPolicy(new iam.PolicyStatement({
+    agentCoreRuntimeRole.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['bedrock:ApplyGuardrail'],
       resources: ['*'],
     }));
-    agentCoreRuntimeRole.addToPolicy(new iam.PolicyStatement({
+    agentCoreRuntimeRole.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['bedrock-agentcore:InvokeAgentRuntime'],
       resources: ['*'],
     }));
-    agentCoreRuntimeRole.addToPolicy(new iam.PolicyStatement({
+    agentCoreRuntimeRole.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
       resources: ['*'],
     }));
-    agentCoreRuntimeRole.addToPolicy(new iam.PolicyStatement({
+    agentCoreRuntimeRole.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['ecr:GetAuthorizationToken', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'],
       resources: ['*'],
@@ -532,26 +536,23 @@ def handler(event, context):
                 # Wait for runtime to become READY (up to 3 minutes)
                 for _ in range(18):
                     time.sleep(10)
-                    resp = client.list_agent_runtimes()
-                    for rt in resp.get('agentRuntimes', []):
-                        if rt['agentRuntimeId'] == runtime_id:
-                            if rt['status'] == 'READY':
-                                cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Status': 'READY'})
-                                return
-                            break
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Status': 'TIMEOUT'})
+                    resp = client.get_agent_runtime(agentRuntimeId=runtime_id)
+                    if resp['status'] == 'READY':
+                        cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Status': 'READY'})
+                        return
+                cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': 'Runtime readiness timed out'})
             except Exception as e:
                 print(f'Update failed: {e}')
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Status': str(e)})
+                cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
         else:
             cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
     except Exception as e:
         print(f'Error: {e}')
-        cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Error': str(e)})
+        cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
 `),
     });
     forceRuntimeUpdateFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['bedrock-agentcore-control:UpdateAgentRuntime', 'bedrock-agentcore-control:ListAgentRuntimes'],
+      actions: ['bedrock-agentcore:UpdateAgentRuntime', 'bedrock-agentcore:GetAgentRuntime'],
       resources: ['*'],
     }));
     forceRuntimeUpdateFn.addToRolePolicy(new iam.PolicyStatement({
@@ -566,7 +567,7 @@ def handler(event, context):
     const forceRuntimeUpdate = new cdk.CustomResource(this, 'ForceRuntimeUpdate', {
       serviceToken: forceRuntimeUpdateProvider.serviceToken,
       properties: {
-        RuntimeId: agentRuntime.ref,  // Physical resource ID of the AgentCore Runtime
+        RuntimeId: agentRuntime.getAtt('AgentRuntimeId').toString(),
         ContainerUri: `${agentEcr.repositoryUri}:latest`,
         RoleArn: agentCoreRuntimeRole.roleArn,
         // Force update on every deploy by changing this value
@@ -661,22 +662,13 @@ def handler(event, context):
     });
 
     // SageMaker execution role
-    const smExecRole = new iam.Role(this, 'SageMakerExecRole', {
-      assumedBy: new iam.CompositePrincipal(
-        new iam.ServicePrincipal('sagemaker.amazonaws.com'),
-        new iam.ServicePrincipal('lambda.amazonaws.com'),
-        new iam.ServicePrincipal('bedrock.amazonaws.com'),
-      ),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSageMakerFullAccess'),
-      ],
-    });
-    smExecRole.addToPolicy(new iam.PolicyStatement({
+    const smExecRole = iam.Role.fromRoleName(this, 'SageMakerExecRole', 'ai-league-sagemaker-role', { mutable: true });
+    smExecRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['lambda:UpdateFunctionCode', 'lambda:GetFunction', 'lambda:InvokeFunction'],
       resources: [`arn:aws:lambda:*:*:function:AgentCoreGatewayTool-*`],
     }));
     // Lambda permissions for reward functions (fine-tuning evaluators)
-    smExecRole.addToPolicy(new iam.PolicyStatement({
+    smExecRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: [
         'lambda:CreateFunction',
         'lambda:UpdateFunctionCode',
@@ -691,12 +683,12 @@ def handler(event, context):
       resources: ['*'],
     }));
     // Allow SageMaker to pass its own role (needed for training jobs and reward functions)
-    smExecRole.addToPolicy(new iam.PolicyStatement({
+    smExecRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['iam:PassRole'],
       resources: [smExecRole.roleArn],
     }));
     // Bedrock permissions for fine-tuning (model customization)
-    smExecRole.addToPolicy(new iam.PolicyStatement({
+    smExecRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: [
         'bedrock:CreateModelCustomizationJob',
         'bedrock:GetModelCustomizationJob',
@@ -714,7 +706,7 @@ def handler(event, context):
       resources: ['*'],
     }));
     // Allow loading customization recipes from SageMaker HubContent (required for fine-tuning)
-    smExecRole.addToPolicy(new iam.PolicyStatement({
+    smExecRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: [
         'sagemaker:DescribeHubContent',
         'sagemaker:ListHubContents',
@@ -725,7 +717,7 @@ def handler(event, context):
       resources: ['*'],
     }));
     // S3 access for JumpStart model artifacts and customization recipes
-    smExecRole.addToPolicy(new iam.PolicyStatement({
+    smExecRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: [
         's3:GetObject',
         's3:ListBucket',
@@ -1451,6 +1443,7 @@ def handler(event, context):
     // (pathfinding + challenge execution) with incremental DynamoDB flushes.
     const gameRunnerLambda = new lambda.Function(this, 'GameRunnerFunction', {
       functionName: 'ai-league-game-runner',
+      role: gameRunnerRole,
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'game_runner_handler.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../lambda/agentic-api')),
