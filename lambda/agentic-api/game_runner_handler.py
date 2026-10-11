@@ -75,6 +75,13 @@ def handler(event, context):
                 session_id=f"{session_id}-attempt{attempt}" if attempt > 0 else session_id,
             )
             if agent_response:
+                planning_error = path_parser.navigation_error(agent_response)
+                if planning_error is not None:
+                    _update_session(gs_table, session_id, {
+                        'status': 'error', 'error': f'Pathfinder planning failed: {planning_error}'[:500],
+                        'agentResponse': agent_response[:5000],
+                    })
+                    return
                 # Accumulate pathfinding output tokens
                 if pathfind_usage:
                     pathfinding_tokens += pathfind_usage.get("total_usage", {}).get("outputTokens", 0)

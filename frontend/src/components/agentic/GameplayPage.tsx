@@ -208,6 +208,8 @@ export default function GameplayPage() {
   }, [cancelWarmupHook]);
 
   // Refs for polling and replay
+  const [replaySpeed, setReplaySpeed] = useState('2');
+  const replaySpeedRef = useRef(2);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollCountRef = useRef(0);
@@ -478,7 +480,7 @@ export default function GameplayPage() {
       const event = replayQueueRef.current.shift()!;
       // Use backend-reported duration for AnswerChallenge (simulates real processing time)
       // Fall back to default delay if no duration recorded
-      const delay = event.durationMs ?? EVENT_DELAYS[event.type] ?? 200;
+      const delay = (event.durationMs ?? EVENT_DELAYS[event.type] ?? 200) / replaySpeedRef.current;
 
       processEventRef.current(event);
 
@@ -1157,7 +1159,21 @@ export default function GameplayPage() {
 
   return (
     <SpaceBetween size="l">
-      <Header variant="h1">Game Play</Header>
+      <Header variant="h1" actions={
+        <Select
+          ariaLabel="Replay speed"
+          selectedOption={{ label: `Replay: ${replaySpeed}x`, value: replaySpeed }}
+          options={[1, 2, 4].map((speed) => ({ label: `Replay: ${speed}x`, value: String(speed) }))}
+          onChange={({ detail }) => {
+            const speed = detail.selectedOption.value || '2';
+            replaySpeedRef.current = Number(speed);
+            setReplaySpeed(speed);
+          }}
+        />
+      }>Game Play</Header>
+      <Box variant="small" color="text-body-secondary">
+        Replay speed changes playback only. AI processing and score calculations are unchanged.
+      </Box>
 
       {error && error.startsWith('NO_AGENT_CONFIGURED:') && (
         <Alert type="warning" dismissible onDismiss={() => setError(null)}>

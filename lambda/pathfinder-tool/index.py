@@ -1,18 +1,28 @@
 # Lambda
 
 import json
+from score_aware import plan_score_aware
 from collections import deque
 
 CELL_POINTS = {"c7": 250}
 COLLECTIBLE_COINS = {"c7"}
 DIRECTIONS = [(-1, 0, "up"), (1, 0, "down"), (0, -1, "left"), (0, 1, "right")]
 
+# Potential rewards, not guaranteed winnings: challenges still require correct answers.
+# These match the game runner defaults; full map objects can override them.
+SWIFT_REWARD_POINTS = {
+    "c1": 400, "c2": 600, "c3": 550, "c4": 800, "c5": 250,
+    "c6": 1000, "c7": 250, "c17": 750, "c18": 500,
+    "c30": 1000, "c31": 1000, "c32": 1000, "c33": 1000,
+    "c40": 50, "c41": 50, "c42": 50, "c43": 50,
+}
+
 
 def lambda_handler(event, context):
     """
     AWS Lambda function for pathfinding using Swift path strategy by default
     Handles both API Gateway format and direct AgentCore Gateway format
-    
+
     ## Map Definitions
         - "wall": non-walkable cell
         - "treasure": target cell to reach
@@ -40,14 +50,15 @@ def lambda_handler(event, context):
         ["normal","wall","wall","wall","wall","wall","wall","normal","normal","c7"],
         ["c7","normal","c3","normal","c4","normal","c2","normal","treasure","normal"]
     ]
-    
+
     ## Pathfinding Lambda with strategy selection.
 
     Usage: Use strategy get_coins
 
     Strategies:
-      swift     - BFS shortest path to treasure (default)
+      swift     - Shortest path; ties favor fewer spikes, then higher potential rewards
       get_coins - Greedily collect c7 coins on the way to treasure
+      score_aware - Bounded reward detours using full map metadata and time estimates
     """
 
     try:
@@ -60,6 +71,8 @@ def lambda_handler(event, context):
         game_map = body.get('game_map', [])
         start_pos = body.get('start_pos', [0, 0])
         strategy = body.get('strategy', 'swift')
+        if strategy not in ('swift', 'get_coins', 'score_aware'):
+            return _err(400, 'Unsupported strategy; choose swift, get_coins or score_aware')
         print(f"DEBUG: strategy={strategy}")
 
         # Robustly parse game_map — handle various formats from LLM sub-agents:
@@ -144,12 +157,25 @@ def lambda_handler(event, context):
         if not treasure:
             return _err(400, 'No treasure found on map')
 
-        if strategy == 'get_coins':
+        planning_result = None
+        if strategy == 'score_aware':
+            if map_object is None:
+                return _err(400, 'score_aware requires a full map object with time limit and tile overrides, not just a grid')
+            try:
+                planning_result = plan_score_aware(map_object, tuple(start_pos), treasure,
+                                                  body.get('planning', {}))
+            except (ValueError, TypeError, KeyError) as error:
+                return _err(400, str(error))
+            path = planning_result['path']
+        elif strategy == 'get_coins':
             path = get_coins_path(game_map, rows, cols, tuple(start_pos), treasure)
         else:
-            path = swift_path(game_map, rows, cols, tuple(start_pos), treasure)
+            path = swift_path(game_map, rows, cols, tuple(start_pos), treasure,
+                              tile_overrides=(map_object or {}).get('tileOverrides'))
 
         result = {'path': path, 'steps': len(path), 'start_position': start_pos}
+        if planning_result is not None:
+            result['planning'] = {key: value for key, value in planning_result.items() if key != 'path'}
         print(f"RESULT: strategy={strategy} steps={len(path)}")
         return {'statusCode': 200, 'body': json.dumps(result)}
 
@@ -178,9 +204,64 @@ def _bfs(game_map, rows, cols, start, goal):
     return None
 
 
-def swift_path(game_map, rows, cols, start, treasure):
-    """BFS shortest path to treasure."""
-    return _bfs(game_map, rows, cols, start, treasure) or []
+def swift_path(game_map, rows, cols, start, treasure, tile_overrides=None):
+    """Choose the safest, highest-potential-reward route among shortest paths.
+
+    This is only a tie-breaker, not a time-budgeted detour planner. Challenge
+    success, keys/locked doors, and model response times are not predicted here.
+    """
+    tile_overrides = tile_overrides or {}
+
+    # Reverse BFS measures the minimum number of remaining moves at every cell.
+    # Any chosen move MUST reduce that distance by one: no loops or extra steps.
+    distances = {treasure: 0}
+    queue = deque([treasure])
+    ordered = []
+    while queue:
+        r, c = queue.popleft()
+        ordered.append((r, c))
+        for dr, dc, _ in DIRECTIONS:
+            neighbor = (r + dr, c + dc)
+            nr, nc = neighbor
+            if (0 <= nr < rows and 0 <= nc < cols
+                    and game_map[nr][nc] != "wall" and neighbor not in distances):
+                distances[neighbor] = distances[(r, c)] + 1
+                queue.append(neighbor)
+    if start not in distances:
+        return []
+
+    # Distances increase in BFS order, so each shorter suffix is already solved.
+    # Rank: least spike damage, most potential points, fewest counting distractions.
+    best = {treasure: (0, 0, 0)}
+    next_step = {}
+    for position in ordered:
+        if position == treasure:
+            continue
+        r, c = position
+        winning_rank = None
+        for dr, dc, move in DIRECTIONS:
+            neighbor = (r + dr, c + dc)
+            if distances.get(neighbor) != distances[position] - 1:
+                continue
+            nr, nc = neighbor
+            tile = game_map[nr][nc]
+            override = tile_overrides.get(tile, {})
+            points = override.get("points", SWIFT_REWARD_POINTS.get(tile, 0))
+            damage = override.get("damage", 1) if tile == "c8" else 0
+            suffix = best[neighbor]
+            rank = (suffix[0] + damage, suffix[1] - points,
+                    suffix[2] + (tile == "c17"))
+            if winning_rank is None or rank < winning_rank:
+                winning_rank = rank
+                next_step[position] = (neighbor, move)
+        best[position] = winning_rank
+
+    path = []
+    position = start
+    while position != treasure:
+        position, move = next_step[position]
+        path.append(move)
+    return path
 
 
 def get_coins_path(game_map, rows, cols, start, treasure):

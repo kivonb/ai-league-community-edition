@@ -44,6 +44,17 @@ def label_to_coords(label: str) -> Optional[Tuple[int, int]]:
     return (row, col)
 
 
+def navigation_error(response_text: str) -> Optional[str]:
+    """Recognize explicit planning failures before permissive direction parsing."""
+    try:
+        value = json.loads(response_text)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(value, dict) and 'error' in value:
+        return str(value['error']) or 'Pathfinder reported an unspecified error'
+    return None
+
+
 def parse_navigation_path(
     response_text: str, start: Tuple[int, int] = (0, 0)
 ) -> Optional[List[Tuple[int, int]]]:
@@ -65,7 +76,7 @@ def parse_navigation_path(
     Returns:
         List of (row, col) tuples representing the path, or None if parsing fails.
     """
-    if not response_text:
+    if not response_text or navigation_error(response_text) is not None:
         return None
 
     # 1. Try to find {"path": [...]} JSON object

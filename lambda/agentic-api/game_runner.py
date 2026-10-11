@@ -15,6 +15,7 @@ Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9, 5.10, 9.1, 9.2, 9.3, 
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Dict, List, Set, Tuple
@@ -769,6 +770,7 @@ def run_game_session_v2(
                             **(invoke_payload or {}),
                             "prompt": question,
                             "task_type": "challenge",
+                            "context": json.dumps({"grid": grid}),
                             "session_id": session_id,
                         }
                         answer, usage = invoke_agent_runtime(
@@ -876,6 +878,7 @@ def run_game_session_v2(
                         **(invoke_payload or {}),
                         "prompt": question,
                         "task_type": "challenge",
+                        "context": json.dumps({"grid": grid}),
                         "session_id": session_id,
                     }
                     answer, usage = invoke_agent_runtime(
@@ -992,6 +995,7 @@ def run_game_session_v2(
                         **(invoke_payload or {}),
                         "prompt": question,
                         "task_type": "challenge",
+                        "context": json.dumps({"grid": grid}),
                         "session_id": session_id,
                     }
                     answer, usage = invoke_agent_runtime(
